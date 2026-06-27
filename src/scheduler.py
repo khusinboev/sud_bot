@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from src.api_client import fetch_all
 from src.database import batch_upsert, archive_old_records
 from src.excel_export import build_new_records_excel, filename_now
+from src.filters import filter_oliy_talim
 
 if TYPE_CHECKING:
     from aiogram import Bot
@@ -124,7 +125,13 @@ async def run_daily_job(bot: "Bot", user_ids: frozenset[int]) -> None:
         for r in updated_records:
             r["_status"] = "updated"
 
-        summary = _format_changes_summary(new_records, updated_records, fetch_stats, archived_count, elapsed)
+        # Oliy ta'limga tegishli yozuvlarni ajratib olish (category bo'yicha)
+        oliy_talim_records = filter_oliy_talim(changed)
+
+        summary = _format_changes_summary(
+            new_records, updated_records, fetch_stats, archived_count, elapsed,
+            oliy_talim_count=len(oliy_talim_records),
+        )
         await progress.finish(summary)
 
         # Excel — always new message (document can't be edited)
@@ -140,6 +147,22 @@ async def run_daily_job(bot: "Bot", user_ids: frozenset[int]) -> None:
                 )
             except Exception as exc:
                 logger.error(f"Failed to send Excel to {uid}: {exc}")
+
+        # Oliy ta'limga tegishli ishlar — alohida xabar + alohida Excel
+        if oliy_talim_records:
+            oliy_talim_summary = _format_oliy_talim_summary(oliy_talim_records)
+            oliy_talim_buf = build_new_records_excel(oliy_talim_records)
+            oliy_talim_fname = filename_now("oliy_talim")
+            for uid in user_ids:
+                try:
+                    await bot.send_message(uid, oliy_talim_summary, parse_mode="HTML")
+                    await bot.send_document(
+                        uid,
+                        document=BufferedInputFile(oliy_talim_buf.getvalue(), filename=oliy_talim_fname),
+                        caption=f"🎓 Oliy ta'limga tegishli {len(oliy_talim_records)} ta yozuv",
+                    )
+                except Exception as exc:
+                    logger.error(f"Failed to send oliy_talim Excel to {uid}: {exc}")
     else:
         summary = (
             f"✅ <b>Yangilanish tugadi</b>\n\n"
@@ -164,6 +187,7 @@ def _format_changes_summary(
     fetch_stats: dict,
     archived_count: int,
     elapsed: int,
+    oliy_talim_count: int = 0,
 ) -> str:
     lines = ["📬 <b>Yangi ma'lumotlar topildi!</b>\n"]
 
@@ -188,8 +212,28 @@ def _format_changes_summary(
         if len(updated_records) > 3:
             lines.append(f"  <i>... va yana {len(updated_records) - 3} ta</i>")
 
+    if oliy_talim_count:
+        lines.append(f"\n🎓 <b>Shundan oliy ta'limga tegishli: {oliy_talim_count} ta</b> (alohida xabar/fayl quyida)")
+
     lines.append(
         f"\n📊 So'rovlar: {fetch_stats['total_requests']} | "
         f"🗃 Arxiv: {archived_count} | ⏱ {elapsed} daqiqa"
     )
+    return "\n".join(lines)
+
+
+def _format_oliy_talim_summary(records: list[dict]) -> str:
+    lines = ["🎓 <b>Oliy ta'limga tegishli sud ishlari</b>\n"]
+    lines.append(f"Jami: <b>{len(records)} ta</b>\n")
+
+    for r in records[:10]:
+        status_icon = "🆕" if r.get("_status") == "new" else "✏️"
+        lines.append(
+            f"{status_icon} <code>{r.get('casenumber', '—')}</code> | "
+            f"{r.get('hearing_date', '')} {r.get('hearing_time', '')}\n"
+            f"   <i>{r.get('category', '—')}</i>"
+        )
+    if len(records) > 10:
+        lines.append(f"\n<i>... va yana {len(records) - 10} ta (Excel da to'liq)</i>")
+
     return "\n".join(lines)
