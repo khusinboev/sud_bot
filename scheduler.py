@@ -6,15 +6,14 @@ from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING
 
 from api_client import fetch_all
-from database import batch_upsert, archive_old_records, get_all_active
-from excel_export import build_new_records_excel, build_excel, filename_now
+from database import batch_upsert, archive_old_records
+from excel_export import build_new_records_excel, filename_now
 
 if TYPE_CHECKING:
     from aiogram import Bot
 
 logger = logging.getLogger(__name__)
 
-# UTC+5 Tashkent
 TZ_TASHKENT = timezone(timedelta(hours=5))
 
 
@@ -26,45 +25,86 @@ def now_iso() -> str:
     return now_tashkent().isoformat(timespec="seconds")
 
 
-async def run_daily_job(bot: Bot, user_ids: frozenset[int], progress_msg_ids: dict | None = None) -> None:
+class _ProgressTracker:
     """
-    Main daily job:
-    1. Archive old records
-    2. Fetch 30-day window
-    3. Upsert into DB
-    4. Notify users about new/updated + send Excel
-    5. Send summary stats
+    Birinchi marta xabar yuboradi, keyin o'sha xabarni edit qiladi.
+    Agar edit imkonsiz bo'lsa (xabar o'chirilgan, permissions yo'q) — yangi yuboradi.
     """
+
+    def __init__(self, bot: "Bot", user_ids: frozenset[int]):
+        self._bot = bot
+        self._user_ids = user_ids
+        # uid -> message_id
+        self._msg_ids: dict[int, int] = {}
+
+    async def update(self, text: str) -> None:
+        for uid in self._user_ids:
+            existing_id = self._msg_ids.get(uid)
+            if existing_id:
+                try:
+                    await self._bot.edit_message_text(
+                        chat_id=uid,
+                        message_id=existing_id,
+                        text=text,
+                    )
+                    continue
+                except Exception:
+                    # Edit failed (too old, deleted, etc.) — fallthrough to send
+                    self._msg_ids.pop(uid, None)
+
+            # Send new message and save id
+            try:
+                sent = await self._bot.send_message(uid, text)
+                self._msg_ids[uid] = sent.message_id
+            except Exception as exc:
+                logger.warning(f"Could not send progress to {uid}: {exc}")
+
+    async def finish(self, text: str, parse_mode: str = "HTML") -> None:
+        """Progress xabarini yakuniy natija bilan almashtiradi."""
+        for uid in self._user_ids:
+            existing_id = self._msg_ids.get(uid)
+            if existing_id:
+                try:
+                    await self._bot.edit_message_text(
+                        chat_id=uid,
+                        message_id=existing_id,
+                        text=text,
+                        parse_mode=parse_mode,
+                    )
+                    continue
+                except Exception:
+                    self._msg_ids.pop(uid, None)
+
+            try:
+                await self._bot.send_message(uid, text, parse_mode=parse_mode)
+            except Exception as exc:
+                logger.warning(f"Could not send finish msg to {uid}: {exc}")
+
+
+async def run_daily_job(bot: "Bot", user_ids: frozenset[int]) -> None:
     logger.info("Daily job started")
     start_time = now_tashkent()
+
+    progress = _ProgressTracker(bot, user_ids)
 
     # Step 1: Archive
     archived_count = await archive_old_records()
 
-    # Step 2: Fetch
-    # Progress callback — sends occasional Telegram updates
-    progress_cache: dict[str, int] = {"last_reported": 0}
+    # Step 2: Fetch with live progress (edit same message)
+    last_pct: dict[str, int] = {"v": -1}
 
-    async def _progress(done: int, total: int, court: str, d: object) -> None:
+    async def _on_progress(done: int, total: int, court: str, d: object) -> None:
         pct = int(done / total * 100)
-        if pct - progress_cache["last_reported"] >= 20:
-            progress_cache["last_reported"] = pct
-            msg = f"⏳ Ma'lumot yig'ilmoqda... {pct}% ({done}/{total})"
-            for uid in user_ids:
-                try:
-                    await bot.send_message(uid, msg)
-                except Exception:
-                    pass
+        # update every 20% to avoid Telegram rate limit on edits (1 edit/sec per chat)
+        if pct - last_pct["v"] >= 20:
+            last_pct["v"] = pct
+            await progress.update(f"⏳ Ma'lumot yig'ilmoqda... {pct}% ({done}/{total})")
 
-    records, fetch_stats = await fetch_all(progress_callback=_progress)
+    records, fetch_stats = await fetch_all(progress_callback=_on_progress)
 
     if not records:
         logger.warning("No records fetched")
-        for uid in user_ids:
-            try:
-                await bot.send_message(uid, "⚠️ API dan hech qanday ma'lumot kelmadi.")
-            except Exception:
-                pass
+        await progress.finish("⚠️ API dan hech qanday ma'lumot kelmadi.")
         return
 
     # Step 3: Upsert
@@ -77,30 +117,29 @@ async def run_daily_job(bot: Bot, user_ids: frozenset[int], progress_msg_ids: di
 
     elapsed = (now_tashkent() - start_time).seconds // 60
 
-    # Step 4: Notify if changes
+    # Step 4: Result — edit progress message into final summary
     if changed:
-        # Tag records with status for Excel coloring
         for r in new_records:
             r["_status"] = "new"
         for r in updated_records:
             r["_status"] = "updated"
 
-        change_text = _format_changes_summary(new_records, updated_records, fetch_stats)
+        summary = _format_changes_summary(new_records, updated_records, fetch_stats, archived_count, elapsed)
+        await progress.finish(summary)
 
+        # Excel — always new message (document can't be edited)
         excel_buf = build_new_records_excel(changed)
         fname = filename_now("yangi_majlislar")
-
+        from aiogram.types import BufferedInputFile
         for uid in user_ids:
             try:
-                await bot.send_message(uid, change_text, parse_mode="HTML")
-                from aiogram.types import BufferedInputFile
                 await bot.send_document(
                     uid,
                     document=BufferedInputFile(excel_buf.getvalue(), filename=fname),
                     caption=f"📎 Yangi/o'zgargan {len(changed)} ta yozuv",
                 )
             except Exception as exc:
-                logger.error(f"Failed to notify user {uid}: {exc}")
+                logger.error(f"Failed to send Excel to {uid}: {exc}")
     else:
         summary = (
             f"✅ <b>Yangilanish tugadi</b>\n\n"
@@ -111,11 +150,7 @@ async def run_daily_job(bot: Bot, user_ids: frozenset[int], progress_msg_ids: di
             f"🗃 Arxivlangan: {archived_count}\n"
             f"⏱ Vaqt: {elapsed} daqiqa"
         )
-        for uid in user_ids:
-            try:
-                await bot.send_message(uid, summary, parse_mode="HTML")
-            except Exception as exc:
-                logger.error(f"Failed to send summary to {uid}: {exc}")
+        await progress.finish(summary)
 
     logger.info(
         f"Daily job done: new={len(new_records)}, updated={len(updated_records)}, "
@@ -127,6 +162,8 @@ def _format_changes_summary(
     new_records: list[dict],
     updated_records: list[dict],
     fetch_stats: dict,
+    archived_count: int,
+    elapsed: int,
 ) -> str:
     lines = ["📬 <b>Yangi ma'lumotlar topildi!</b>\n"]
 
@@ -151,5 +188,8 @@ def _format_changes_summary(
         if len(updated_records) > 3:
             lines.append(f"  <i>... va yana {len(updated_records) - 3} ta</i>")
 
-    lines.append(f"\n📊 Jami so'rovlar: {fetch_stats['total_requests']}")
+    lines.append(
+        f"\n📊 So'rovlar: {fetch_stats['total_requests']} | "
+        f"🗃 Arxiv: {archived_count} | ⏱ {elapsed} daqiqa"
+    )
     return "\n".join(lines)
