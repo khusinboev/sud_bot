@@ -1,0 +1,229 @@
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from datetime import date, timedelta
+from typing import Any
+
+import aiosqlite
+
+from config import config
+
+logger = logging.getLogger(__name__)
+
+CREATE_CASES_TABLE = """
+CREATE TABLE IF NOT EXISTS cases (
+    case_id       TEXT PRIMARY KEY,
+    casenumber    TEXT,
+    hearing_date  TEXT,
+    hearing_time  TEXT,
+    responsible   TEXT,
+    instance      TEXT,
+    parentregionid TEXT,
+    regionid      TEXT,
+    globalid      TEXT,
+    claimkind     TEXT,
+    claimtype     TEXT,
+    category      TEXT,
+    claiment      TEXT,
+    defendant     TEXT,
+    representing_org TEXT,
+    first_seen    TEXT NOT NULL,
+    last_updated  TEXT NOT NULL
+)
+"""
+
+CREATE_CHANGELOG_TABLE = """
+CREATE TABLE IF NOT EXISTS changelog (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id     TEXT NOT NULL,
+    field_name  TEXT NOT NULL,
+    old_value   TEXT,
+    new_value   TEXT,
+    changed_at  TEXT NOT NULL
+)
+"""
+
+
+TRACKED_FIELDS = (
+    "casenumber", "hearing_date", "hearing_time",
+    "responsible", "instance", "category",
+    "claiment", "defendant",
+)
+
+CASE_FIELDS = (
+    "case_id", "casenumber", "hearing_date", "hearing_time",
+    "responsible", "instance", "parentregionid", "regionid",
+    "globalid", "claimkind", "claimtype", "category",
+    "claiment", "defendant", "representing_org",
+)
+
+
+async def init_db(db_path: Path) -> None:
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(CREATE_CASES_TABLE)
+        await db.execute(CREATE_CHANGELOG_TABLE)
+        await db.commit()
+
+
+async def init_all() -> None:
+    await init_db(config.active_db_path)
+    await init_db(config.archive_db_path)
+
+
+def _row_to_dict(row: aiosqlite.Row, keys: tuple[str, ...]) -> dict[str, Any]:
+    return dict(zip(keys, row))
+
+
+async def upsert_case(db: aiosqlite.Connection, record: dict[str, Any], now: str) -> str:
+    """
+    Returns: 'new' | 'updated' | 'unchanged'
+    """
+    case_id = record["case_id"]
+
+    async with db.execute(
+        f"SELECT {', '.join(CASE_FIELDS)}, first_seen FROM cases WHERE case_id = ?",
+        (case_id,),
+    ) as cursor:
+        existing = await cursor.fetchone()
+
+    if existing is None:
+        await db.execute(
+            f"""
+            INSERT INTO cases ({', '.join(CASE_FIELDS)}, first_seen, last_updated)
+            VALUES ({', '.join('?' * len(CASE_FIELDS))}, ?, ?)
+            """,
+            [record.get(f) for f in CASE_FIELDS] + [now, now],
+        )
+        return "new"
+
+    # Check for changes in tracked fields
+    existing_dict = _row_to_dict(existing, CASE_FIELDS + ("first_seen",))
+    changes: list[tuple[str, str | None, str | None]] = []
+
+    for field in TRACKED_FIELDS:
+        old_val = existing_dict.get(field)
+        new_val = record.get(field)
+        if old_val != new_val:
+            changes.append((field, old_val, new_val))
+
+    if not changes:
+        return "unchanged"
+
+    # Log changes
+    for field_name, old_val, new_val in changes:
+        await db.execute(
+            "INSERT INTO changelog (case_id, field_name, old_value, new_value, changed_at) VALUES (?,?,?,?,?)",
+            (case_id, field_name, old_val, new_val, now),
+        )
+
+    update_fields = ", ".join(f"{f} = ?" for f in TRACKED_FIELDS)
+    await db.execute(
+        f"UPDATE cases SET {update_fields}, last_updated = ? WHERE case_id = ?",
+        [record.get(f) for f in TRACKED_FIELDS] + [now, case_id],
+    )
+    return "updated"
+
+
+async def archive_old_records() -> int:
+    """Move records with hearing_date < today to archive db. Returns count moved."""
+    today_str = date.today().isoformat()
+    archived = 0
+
+    async with aiosqlite.connect(config.active_db_path) as active_db:
+        async with active_db.execute(
+            "SELECT * FROM cases WHERE hearing_date < ?", (today_str,)
+        ) as cursor:
+            old_rows = await cursor.fetchall()
+            col_names = [d[0] for d in cursor.description]
+
+        if not old_rows:
+            return 0
+
+        async with aiosqlite.connect(config.archive_db_path) as arch_db:
+            for row in old_rows:
+                row_dict = dict(zip(col_names, row))
+                cols = ", ".join(row_dict.keys())
+                placeholders = ", ".join("?" * len(row_dict))
+                await arch_db.execute(
+                    f"INSERT OR REPLACE INTO cases ({cols}) VALUES ({placeholders})",
+                    list(row_dict.values()),
+                )
+            await arch_db.commit()
+
+        case_ids = [row[col_names.index("case_id")] for row in old_rows]
+        await active_db.execute(
+            f"DELETE FROM cases WHERE case_id IN ({','.join('?' * len(case_ids))})",
+            case_ids,
+        )
+        await active_db.commit()
+        archived = len(old_rows)
+
+    logger.info(f"Archived {archived} old records")
+    return archived
+
+
+async def batch_upsert(records: list[dict[str, Any]], now: str) -> dict[str, list[dict]]:
+    """
+    Returns dict with keys: 'new', 'updated', 'unchanged'
+    Each value is list of records.
+    """
+    result: dict[str, list[dict]] = {"new": [], "updated": [], "unchanged": []}
+
+    async with aiosqlite.connect(config.active_db_path) as db:
+        for record in records:
+            status = await upsert_case(db, record, now)
+            result[status].append(record)
+        await db.commit()
+
+    return result
+
+
+async def get_all_active() -> list[dict[str, Any]]:
+    async with aiosqlite.connect(config.active_db_path) as db:
+        async with db.execute(
+            "SELECT * FROM cases ORDER BY hearing_date, hearing_time"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            col_names = [d[0] for d in cursor.description]
+    return [dict(zip(col_names, row)) for row in rows]
+
+
+async def get_statistics() -> dict[str, Any]:
+    async with aiosqlite.connect(config.active_db_path) as db:
+        async with db.execute("SELECT COUNT(*) FROM cases") as cur:
+            total = (await cur.fetchone())[0]
+
+        async with db.execute(
+            "SELECT instance, COUNT(*) as cnt FROM cases GROUP BY instance ORDER BY cnt DESC"
+        ) as cur:
+            by_instance = await cur.fetchall()
+
+        async with db.execute(
+            "SELECT globalid, COUNT(*) as cnt FROM cases GROUP BY globalid ORDER BY cnt DESC LIMIT 10"
+        ) as cur:
+            by_court = await cur.fetchall()
+
+        async with db.execute(
+            "SELECT hearing_date, COUNT(*) as cnt FROM cases GROUP BY hearing_date ORDER BY hearing_date LIMIT 10"
+        ) as cur:
+            by_date = await cur.fetchall()
+
+        async with db.execute(
+            "SELECT category, COUNT(*) as cnt FROM cases GROUP BY category ORDER BY cnt DESC LIMIT 5"
+        ) as cur:
+            by_category = await cur.fetchall()
+
+        async with db.execute(
+            "SELECT MIN(hearing_date), MAX(hearing_date) FROM cases"
+        ) as cur:
+            date_range = await cur.fetchone()
+
+    return {
+        "total": total,
+        "by_instance": by_instance,
+        "by_court": by_court,
+        "by_date": by_date,
+        "by_category": by_category,
+        "date_range": date_range,
+    }
