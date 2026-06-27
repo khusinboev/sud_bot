@@ -12,10 +12,10 @@ from aiogram.types import (
     BufferedInputFile,
 )
 
-from config import config
-from database import get_all_active, get_statistics
-from excel_export import build_excel, filename_now
-from scheduler import run_daily_job
+from src.config import config
+from src.database import get_all_active, get_statistics
+from src.excel_export import build_excel, filename_now
+from src.scheduler import run_daily_job
 
 logger = logging.getLogger(__name__)
 router = Router()

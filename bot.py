@@ -11,10 +11,10 @@ from aiogram.enums import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from config import config
-from database import init_all
-from handlers import router
-from scheduler import run_daily_job
+from src.config import config
+from src.database import init_all
+from src.handlers import router
+from src.scheduler import run_daily_job
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,7 +63,7 @@ async def main() -> None:
     for uid in config.allowed_user_ids:
         try:
             from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-            from handlers import main_keyboard
+            from src.handlers import main_keyboard
             await bot.send_message(
                 uid,
                 f"🤖 <b>Bot ishga tushdi</b>\n"

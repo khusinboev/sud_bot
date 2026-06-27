@@ -8,8 +8,8 @@ from typing import Any
 
 import aiohttp
 
-from config import config
-from regions import get_active_court_names
+from src.config import config
+from src.regions import get_active_court_names
 
 logger = logging.getLogger(__name__)
 

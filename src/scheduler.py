@@ -5,9 +5,9 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING
 
-from api_client import fetch_all
-from database import batch_upsert, archive_old_records
-from excel_export import build_new_records_excel, filename_now
+from src.api_client import fetch_all
+from src.database import batch_upsert, archive_old_records
+from src.excel_export import build_new_records_excel, filename_now
 
 if TYPE_CHECKING:
     from aiogram import Bot

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from functools import lru_cache
 
-from config import config
+from src.config import config
 
 REGIONS_FILE = Path(__file__).parent / "regions.json"
 
