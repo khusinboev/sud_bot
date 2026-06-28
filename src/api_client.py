@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from datetime import date, timedelta
+from datetime import date, timedelta, timezone
 from typing import Any
 
 import aiohttp
@@ -22,6 +22,14 @@ HEADERS = {
     "Accept": "application/json",
     "User-Agent": "Mozilla/5.0 (compatible; SudBot/1.0)",
 }
+
+TZ_TASHKENT = timezone(timedelta(hours=5))
+
+
+def _today_tashkent() -> date:
+    """Toshkent vaqti bo'yicha bugungi sana (UTC+5)."""
+    from datetime import datetime
+    return datetime.now(TZ_TASHKENT).date()
 
 
 async def _fetch_one(
@@ -90,13 +98,18 @@ async def fetch_all(
     progress_callback: Any = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
-    Fetch 30 days from today for all active courts.
+    Toshkent vaqti bo'yicha ERTANGI kundan boshlab kelasi 30 kunlik ma'lumot yig'adi.
+    (Bugun emas — bugungi sudlar o'tib ketgan bo'lishi mumkin, bizga kelasi ishlar kerak)
     Returns: (all_records, stats)
-    stats = {total_requests, successful, failed, total_records}
+    stats = {total_requests, successful, failed, raw_records, unique_records, date_from, date_to}
     """
     courts = get_active_court_names()
-    today = date.today()
-    dates = [today + timedelta(days=i) for i in range(30)]
+    today = _today_tashkent()
+    # Kelasi 30 kun: ertangi kundan boshlab (bugunni ham qo'shish kerak bo'lsa range(0, 30))
+    # Vazifa: "bugun + kelasi 30 kunlik" — demak bugundan boshlab 31 kun (0..30)
+    dates = [today + timedelta(days=i) for i in range(1, 31)]
+    date_from = dates[0]
+    date_to = dates[-1]
 
     total_requests = len(courts) * len(dates)
     completed = 0
@@ -143,6 +156,8 @@ async def fetch_all(
         "failed": failed,
         "raw_records": len(all_records),
         "unique_records": len(unique_records),
+        "date_from": date_from.strftime("%d.%m.%Y"),
+        "date_to": date_to.strftime("%d.%m.%Y"),
     }
     logger.info(f"Fetch complete: {stats}")
     return unique_records, stats

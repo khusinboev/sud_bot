@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from datetime import date, timedelta
+from datetime import date, timedelta, timezone
 from typing import Any
 
 import aiosqlite
@@ -11,6 +11,8 @@ from src.config import config
 from src.filters import filter_oliy_talim
 
 logger = logging.getLogger(__name__)
+
+TZ_TASHKENT = timezone(timedelta(hours=5))
 
 CREATE_CASES_TABLE = """
 CREATE TABLE IF NOT EXISTS cases (
@@ -58,6 +60,11 @@ CASE_FIELDS = (
     "globalid", "claimkind", "claimtype", "category",
     "claiment", "defendant", "representing_org",
 )
+
+
+def _today_tashkent() -> date:
+    from datetime import datetime
+    return datetime.now(TZ_TASHKENT).date()
 
 
 async def init_db(db_path: Path) -> None:
@@ -127,8 +134,8 @@ async def upsert_case(db: aiosqlite.Connection, record: dict[str, Any], now: str
 
 
 async def archive_old_records() -> int:
-    """Move records with hearing_date < today to archive db. Returns count moved."""
-    today_str = date.today().isoformat()
+    """Move records with hearing_date < today (Tashkent) to archive db. Returns count moved."""
+    today_str = _today_tashkent().isoformat()
     archived = 0
 
     async with aiosqlite.connect(config.active_db_path) as active_db:
@@ -191,20 +198,52 @@ async def get_all_active() -> list[dict[str, Any]]:
 
 
 async def get_statistics() -> dict[str, Any]:
+    """
+    Aktiv bazadagi barcha ma'lumotlar bo'yicha statistika.
+    date_range kelasi 30 kunlik interval hisobida ko'rsatiladi.
+    """
+    from datetime import datetime
+
+    today = _today_tashkent()
+    date_from = today + timedelta(days=1)
+    date_to = today + timedelta(days=30)
+
     async with aiosqlite.connect(config.active_db_path) as db:
+        # Jami aktiv yozuvlar
         async with db.execute("SELECT COUNT(*) FROM cases") as cur:
             total = (await cur.fetchone())[0]
 
+        # Aslida bazadagi sana diapazoni
         async with db.execute(
             "SELECT MIN(hearing_date), MAX(hearing_date) FROM cases"
         ) as cur:
-            date_range = await cur.fetchone()
+            db_date_range = await cur.fetchone()
 
     all_active = await get_all_active()
     oliy_talim_count = len(filter_oliy_talim(all_active))
 
+    # Sana diapazoni: avval DB dagi real qiymatni formatlash
+    dr_min, dr_max = db_date_range if db_date_range else (None, None)
+    if dr_min:
+        try:
+            dr_min_fmt = datetime.strptime(dr_min, "%Y-%m-%d").strftime("%d.%m.%Y")
+        except Exception:
+            dr_min_fmt = dr_min
+    else:
+        dr_min_fmt = date_from.strftime("%d.%m.%Y")
+
+    if dr_max:
+        try:
+            dr_max_fmt = datetime.strptime(dr_max, "%Y-%m-%d").strftime("%d.%m.%Y")
+        except Exception:
+            dr_max_fmt = dr_max
+    else:
+        dr_max_fmt = date_to.strftime("%d.%m.%Y")
+
     return {
         "total": total,
         "oliy_talim_count": oliy_talim_count,
-        "date_range": date_range,
+        "date_range": (dr_min_fmt, dr_max_fmt),
+        "expected_from": date_from.strftime("%d.%m.%Y"),
+        "expected_to": date_to.strftime("%d.%m.%Y"),
     }
