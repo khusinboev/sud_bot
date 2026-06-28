@@ -125,8 +125,9 @@ async def run_daily_job(bot: "Bot", user_ids: frozenset[int]) -> None:
         for r in updated_records:
             r["_status"] = "updated"
 
-        # Oliy ta'limga tegishli yozuvlarni ajratib olish (category bo'yicha)
-        oliy_talim_records = filter_oliy_talim(changed)
+        # Oliy ta'limga tegishli yozuvlarni ajratib olish — faqat YANGI qo'shilganlar ichidan
+        # (bazada avval bo'lmagan, bugun birinchi marta topilganlar)
+        oliy_talim_records = filter_oliy_talim(new_records)
 
         summary = _format_changes_summary(
             new_records, updated_records, fetch_stats, archived_count, elapsed,
@@ -148,7 +149,7 @@ async def run_daily_job(bot: "Bot", user_ids: frozenset[int]) -> None:
             except Exception as exc:
                 logger.error(f"Failed to send Excel to {uid}: {exc}")
 
-        # Oliy ta'limga tegishli ishlar — alohida xabar + alohida Excel
+        # Oliy ta'limga tegishli ishlar — yangi qo'shilganlar ichidan, alohida xabar + alohida Excel
         if oliy_talim_records:
             oliy_talim_summary = _format_oliy_talim_summary(oliy_talim_records)
             oliy_talim_buf = build_new_records_excel(oliy_talim_records)
@@ -159,7 +160,7 @@ async def run_daily_job(bot: "Bot", user_ids: frozenset[int]) -> None:
                     await bot.send_document(
                         uid,
                         document=BufferedInputFile(oliy_talim_buf.getvalue(), filename=oliy_talim_fname),
-                        caption=f"🎓 Oliy ta'limga tegishli {len(oliy_talim_records)} ta yozuv",
+                        caption=f"🎓 Yangi qo'shilganlar ichidan oliy ta'limga tegishli {len(oliy_talim_records)} ta yozuv",
                     )
                 except Exception as exc:
                     logger.error(f"Failed to send oliy_talim Excel to {uid}: {exc}")
@@ -213,7 +214,7 @@ def _format_changes_summary(
             lines.append(f"  <i>... va yana {len(updated_records) - 3} ta</i>")
 
     if oliy_talim_count:
-        lines.append(f"\n🎓 <b>Shundan oliy ta'limga tegishli: {oliy_talim_count} ta</b> (alohida xabar/fayl quyida)")
+        lines.append(f"\n🎓 <b>Yangi ishlar ichidan oliy ta'limga tegishli: {oliy_talim_count} ta</b> (alohida xabar/fayl quyida)")
 
     lines.append(
         f"\n📊 So'rovlar: {fetch_stats['total_requests']} | "
@@ -223,13 +224,12 @@ def _format_changes_summary(
 
 
 def _format_oliy_talim_summary(records: list[dict]) -> str:
-    lines = ["🎓 <b>Oliy ta'limga tegishli sud ishlari</b>\n"]
+    lines = ["🎓 <b>Yangi qo'shilganlar ichidan oliy ta'limga tegishli ishlar</b>\n"]
     lines.append(f"Jami: <b>{len(records)} ta</b>\n")
 
     for r in records[:10]:
-        status_icon = "🆕" if r.get("_status") == "new" else "✏️"
         lines.append(
-            f"{status_icon} <code>{r.get('casenumber', '—')}</code> | "
+            f"🆕 <code>{r.get('casenumber', '—')}</code> | "
             f"{r.get('hearing_date', '')} {r.get('hearing_time', '')}\n"
             f"   <i>{r.get('category', '—')}</i>"
         )

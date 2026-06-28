@@ -145,31 +145,11 @@ async def _run_job_safe(bot: Bot, user_ids: frozenset[int]) -> None:
 def _format_stats(stats: dict) -> str:
     lines = ["📊 <b>Statistika (aktiv bazadan)</b>\n"]
     lines.append(f"📋 Jami yozuvlar: <b>{stats['total']}</b>")
+    lines.append(f"🎓 Filterga mos (oliy ta'lim): <b>{stats['oliy_talim_count']}</b>")
 
     dr = stats.get("date_range", (None, None))
     if dr and dr[0]:
         lines.append(f"📅 Davr: {dr[0]} → {dr[1]}")
-
-    if stats.get("by_instance"):
-        lines.append("\n<b>Instansiya bo'yicha:</b>")
-        for inst, cnt in stats["by_instance"]:
-            lines.append(f"  • {inst or '—'}: {cnt}")
-
-    if stats.get("by_court"):
-        lines.append("\n<b>Sud bo'yicha (Top 10):</b>")
-        for court, cnt in stats["by_court"]:
-            lines.append(f"  • {court}: {cnt}")
-
-    if stats.get("by_category"):
-        lines.append("\n<b>Kategoriya bo'yicha (Top 5):</b>")
-        for cat, cnt in stats["by_category"]:
-            short = (cat[:40] + "...") if len(cat) > 40 else cat
-            lines.append(f"  • {short}: {cnt}")
-
-    if stats.get("by_date"):
-        lines.append("\n<b>Sana bo'yicha (keyingi 10 kun):</b>")
-        for d, cnt in stats["by_date"]:
-            lines.append(f"  • {d}: {cnt} ta")
 
     lines.append(f"\n🕐 <i>Yangilangan: {datetime.now().strftime('%d.%m.%Y %H:%M')}</i>")
     return "\n".join(lines)

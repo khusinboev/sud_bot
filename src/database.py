@@ -8,6 +8,7 @@ from typing import Any
 import aiosqlite
 
 from src.config import config
+from src.filters import filter_oliy_talim
 
 logger = logging.getLogger(__name__)
 
@@ -195,35 +196,15 @@ async def get_statistics() -> dict[str, Any]:
             total = (await cur.fetchone())[0]
 
         async with db.execute(
-            "SELECT instance, COUNT(*) as cnt FROM cases GROUP BY instance ORDER BY cnt DESC"
-        ) as cur:
-            by_instance = await cur.fetchall()
-
-        async with db.execute(
-            "SELECT globalid, COUNT(*) as cnt FROM cases GROUP BY globalid ORDER BY cnt DESC LIMIT 10"
-        ) as cur:
-            by_court = await cur.fetchall()
-
-        async with db.execute(
-            "SELECT hearing_date, COUNT(*) as cnt FROM cases GROUP BY hearing_date ORDER BY hearing_date LIMIT 10"
-        ) as cur:
-            by_date = await cur.fetchall()
-
-        async with db.execute(
-            "SELECT category, COUNT(*) as cnt FROM cases GROUP BY category ORDER BY cnt DESC LIMIT 5"
-        ) as cur:
-            by_category = await cur.fetchall()
-
-        async with db.execute(
             "SELECT MIN(hearing_date), MAX(hearing_date) FROM cases"
         ) as cur:
             date_range = await cur.fetchone()
 
+    all_active = await get_all_active()
+    oliy_talim_count = len(filter_oliy_talim(all_active))
+
     return {
         "total": total,
-        "by_instance": by_instance,
-        "by_court": by_court,
-        "by_date": by_date,
-        "by_category": by_category,
+        "oliy_talim_count": oliy_talim_count,
         "date_range": date_range,
     }
