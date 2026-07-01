@@ -155,11 +155,10 @@ async def cb_refresh(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("⚠️ Yangilanish allaqachon davom etmoqda!", show_alert=True)
         return
 
-    await callback.answer("🔄 Yangilanish boshlandi!")
+    await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(
-        "⏳ <b>Kelasi 30 kunlik sud ishlari yig'ilmoqda...</b>\n"
-        "Bu bir necha daqiqa olishi mumkin.",
+        "🔄 <b>Yangilanish boshlandi...</b>",
         parse_mode="HTML",
     )
 
@@ -169,30 +168,12 @@ async def cb_refresh(callback: CallbackQuery, bot: Bot) -> None:
 
 
 async def _run_job_safe(bot: Bot, user_ids: frozenset[int]) -> None:
+    # Tugash (yoki xatolik) haqidagi yagona xabarni run_daily_job o'zi
+    # manual=True bilan yuboradi — bu yerda qo'shimcha xabar yuborilmaydi.
     try:
-        await run_daily_job(bot, user_ids)
-        # Tugagach keyboard qaytarish
-        for uid in user_ids:
-            try:
-                await bot.send_message(
-                    uid,
-                    "✅ Yangilanish muvaffaqiyatli tugadi.",
-                    reply_markup=main_keyboard(),
-                )
-            except Exception:
-                pass
+        await run_daily_job(bot, user_ids, manual=True)
     except Exception as exc:
         logger.exception(f"Job failed: {exc}")
-        for uid in user_ids:
-            try:
-                await bot.send_message(
-                    uid,
-                    f"❌ Yangilanish xatosi: <code>{exc}</code>",
-                    parse_mode="HTML",
-                    reply_markup=main_keyboard(),
-                )
-            except Exception:
-                pass
 
 
 def _format_stats(stats: dict) -> str:

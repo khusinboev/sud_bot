@@ -1,6 +1,3 @@
-from __future__ import annotations
-
-import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING
@@ -17,6 +14,10 @@ logger = logging.getLogger(__name__)
 
 TZ_TASHKENT = timezone(timedelta(hours=5))
 
+# Faqat shu userga JIDDIY (kritik) API xatoliklari haqida xabar boriladi.
+# Boshqa hech qanday userga (shu jumladan .env dagi ALLOWED_USER_ID larga ham) yuborilmaydi.
+CRITICAL_ALERT_USER_ID = 1918760732
+
 
 def now_tashkent() -> datetime:
     return datetime.now(TZ_TASHKENT)
@@ -31,233 +32,109 @@ def now_str() -> str:
     return now_tashkent().strftime("%d.%m.%Y %H:%M")
 
 
-class _ProgressTracker:
+async def _send_critical_alert(bot: "Bot", text: str) -> None:
+    """Faqat CRITICAL_ALERT_USER_ID ga, faqat jiddiy (masalan API butunlay
+    ishlamay qolgan) holatlarda yuboriladi."""
+    try:
+        await bot.send_message(CRITICAL_ALERT_USER_ID, text, parse_mode="HTML")
+    except Exception as exc:
+        logger.error(f"Could not send critical alert: {exc}")
+
+
+async def _send_manual_finish(bot: "Bot", user_ids: frozenset[int], success: bool) -> None:
+    """Faqat 'Hozir yangilash' tugmasi bilan qo'lda ishga tushirilganda —
+    qisqa 1 tadan yakuniy xabar."""
+    from src.handlers import main_keyboard  # lazy import — circular import oldini olish uchun
+
+    text = "✅ Yangilanish tugadi." if success else "⚠️ Yangilanish tugadi (xatolik yuz berdi)."
+    for uid in user_ids:
+        try:
+            await bot.send_message(uid, text, reply_markup=main_keyboard())
+        except Exception as exc:
+            logger.warning(f"Could not send finish msg to {uid}: {exc}")
+
+
+async def run_daily_job(bot: "Bot", user_ids: frozenset[int], manual: bool = False) -> None:
     """
-    Birinchi marta xabar yuboradi, keyin o'sha xabarni edit qiladi.
-    Agar edit imkonsiz bo'lsa (xabar o'chirilgan, permissions yo'q) — yangi yuboradi.
+    Avtomatik kunlik (cron) yoki qo'lda ('Hozir yangilash') ishga tushirilgan yangilanish.
+
+    Xatti-harakat:
+    - Kunlik avtomatik: butunlay JIM boshlanadi. Faqat filterga mos yozuvlar
+      topilsa — ular bitta Excelga birlashtirilib yuboriladi. Hech qanday
+      progress/boshlandi/tugadi xabari YO'Q.
+    - Qo'lda ('Hozir yangilash'): faqat 2 ta qisqa xabar — boshlandi (handlers.py
+      da) va tugadi (shu yerda, _send_manual_finish orqali).
+    - JIDDIY xatolik (API butunlay ishlamay qolsa): faqat CRITICAL_ALERT_USER_ID
+      ga qisqa xabar, boshqa hech kimga emas.
     """
+    logger.info(f"Daily job started (manual={manual})")
 
-    def __init__(self, bot: "Bot", user_ids: frozenset[int]):
-        self._bot = bot
-        self._user_ids = user_ids
-        # uid -> message_id
-        self._msg_ids: dict[int, int] = {}
-
-    async def update(self, text: str) -> None:
-        for uid in self._user_ids:
-            existing_id = self._msg_ids.get(uid)
-            if existing_id:
-                try:
-                    await self._bot.edit_message_text(
-                        chat_id=uid,
-                        message_id=existing_id,
-                        text=text,
-                    )
-                    continue
-                except Exception:
-                    # Edit failed (too old, deleted, etc.) — fallthrough to send
-                    self._msg_ids.pop(uid, None)
-
-            # Send new message and save id
-            try:
-                sent = await self._bot.send_message(uid, text)
-                self._msg_ids[uid] = sent.message_id
-            except Exception as exc:
-                logger.warning(f"Could not send progress to {uid}: {exc}")
-
-    async def finish(self, text: str, parse_mode: str = "HTML") -> None:
-        """Progress xabarini yakuniy natija bilan almashtiradi."""
-        for uid in self._user_ids:
-            existing_id = self._msg_ids.get(uid)
-            if existing_id:
-                try:
-                    await self._bot.edit_message_text(
-                        chat_id=uid,
-                        message_id=existing_id,
-                        text=text,
-                        parse_mode=parse_mode,
-                    )
-                    continue
-                except Exception:
-                    self._msg_ids.pop(uid, None)
-
-            try:
-                await self._bot.send_message(uid, text, parse_mode=parse_mode)
-            except Exception as exc:
-                logger.warning(f"Could not send finish msg to {uid}: {exc}")
-
-
-async def run_daily_job(bot: "Bot", user_ids: frozenset[int]) -> None:
-    """
-    Avtomatik kunlik yoki qo'lda ishga tushirilgan yangilanish.
-    Kelasi 30 kunlik sud ishlarini API dan yig'adi, bazaga saqlaydi,
-    yangi/o'zgarganlarni Excel bilan yuboradi.
-    """
-    logger.info("Daily job started")
-    start_time = now_tashkent()
-
-    progress = _ProgressTracker(bot, user_ids)
-
-    # Step 1: Archive (o'tgan sanalarni arxivga ko'chirish)
-    archived_count = await archive_old_records()
-
-    # Step 2: Fetch with live progress (edit same message)
-    last_pct: dict[str, int] = {"v": -1}
-
-    async def _on_progress(done: int, total: int, court: str, d: object) -> None:
-        pct = int(done / total * 100)
-        # update every 20% to avoid Telegram rate limit on edits (1 edit/sec per chat)
-        if pct - last_pct["v"] >= 20:
-            last_pct["v"] = pct
-            await progress.update(f"⏳ Ma'lumot yig'ilmoqda... {pct}% ({done}/{total})")
-
-    records, fetch_stats = await fetch_all(progress_callback=_on_progress)
-
-    if not records:
-        logger.warning("No records fetched")
-        await progress.finish(
-            f"⚠️ <b>API dan hech qanday ma'lumot kelmadi.</b>\n\n"
-            f"🕐 <i>Tekshirilgan: {now_str()}</i>"
+    try:
+        archived_count = await archive_old_records()
+        records, fetch_stats = await fetch_all()
+    except Exception as exc:
+        logger.exception(f"Critical failure during fetch: {exc}")
+        await _send_critical_alert(
+            bot,
+            f"❌ <b>Kritik xatolik</b>: ma'lumot olishda muammo yuz berdi.\n<code>{exc}</code>",
         )
+        if manual:
+            await _send_manual_finish(bot, user_ids, success=False)
         return
 
-    # Step 3: Upsert
+    # To'liq API o'chib qolgan holat (barcha so'rovlar xato bergan)
+    if fetch_stats["total_requests"] > 0 and fetch_stats["failed"] == fetch_stats["total_requests"]:
+        logger.error("Complete API outage detected")
+        await _send_critical_alert(
+            bot,
+            f"❌ <b>API butunlay javob bermayapti.</b>\n"
+            f"So'rovlar: {fetch_stats['total_requests']}, barchasi xato.\n"
+            f"🕐 {now_str()}",
+        )
+        if manual:
+            await _send_manual_finish(bot, user_ids, success=False)
+        return
+
+    if not records:
+        logger.info("No records fetched")
+        if manual:
+            await _send_manual_finish(bot, user_ids, success=True)
+        return
+
     now = now_iso()
     upsert_result = await batch_upsert(records, now)
-
     new_records = upsert_result["new"]
     updated_records = upsert_result["updated"]
-    unchanged_count = len(upsert_result["unchanged"])
     changed = new_records + updated_records
 
-    elapsed = max(1, (now_tashkent() - start_time).seconds // 60)
-
-    # Step 4: Result
     if changed:
         for r in new_records:
             r["_status"] = "new"
         for r in updated_records:
             r["_status"] = "updated"
 
-        # Oliy ta'limga tegishli — faqat YANGI qo'shilganlar ichidan
-        oliy_talim_records = filter_oliy_talim(new_records)
-
-        summary = _format_changes_summary(
-            new_records, updated_records, fetch_stats, archived_count,
-            unchanged_count, elapsed,
-            oliy_talim_count=len(oliy_talim_records),
-        )
-        await progress.finish(summary)
-
-        # Excel — always new message (document can't be edited)
-        excel_buf = build_new_records_excel(changed)
-        fname = filename_now("yangi_majlislar")
-        from aiogram.types import BufferedInputFile
-        for uid in user_ids:
-            try:
-                await bot.send_document(
-                    uid,
-                    document=BufferedInputFile(excel_buf.getvalue(), filename=fname),
-                    caption=f"📎 Yangi/o'zgargan <b>{len(changed)}</b> ta yozuv",
-                    parse_mode="HTML",
-                )
-            except Exception as exc:
-                logger.error(f"Failed to send Excel to {uid}: {exc}")
-
-        # Oliy ta'limga tegishli — alohida xabar + Excel
-        if oliy_talim_records:
-            oliy_talim_summary = _format_oliy_talim_summary(oliy_talim_records)
-            oliy_talim_buf = build_new_records_excel(oliy_talim_records)
-            oliy_talim_fname = filename_now("oliy_talim")
+        # Barcha columnlar bo'yicha filterlab, mos kelganlarini bitta Excelga
+        # birlashtirib yuboradi. Mos kelmasa — hech narsa yuborilmaydi (jim).
+        matched = filter_oliy_talim(changed)
+        if matched:
+            excel_buf = build_new_records_excel(matched)
+            fname = filename_now("oliy_talim")
+            from aiogram.types import BufferedInputFile
             for uid in user_ids:
                 try:
-                    await bot.send_message(uid, oliy_talim_summary, parse_mode="HTML")
                     await bot.send_document(
                         uid,
-                        document=BufferedInputFile(oliy_talim_buf.getvalue(), filename=oliy_talim_fname),
-                        caption=f"🎓 Yangi ishlar ichidan oliy ta'limga tegishli: <b>{len(oliy_talim_records)}</b> ta",
+                        document=BufferedInputFile(excel_buf.getvalue(), filename=fname),
+                        caption=f"🎓 Filterga mos: <b>{len(matched)}</b> ta yozuv",
                         parse_mode="HTML",
                     )
                 except Exception as exc:
-                    logger.error(f"Failed to send oliy_talim Excel to {uid}: {exc}")
-    else:
-        summary = (
-            f"✅ <b>Yangilanish tugadi</b>\n\n"
-            f"📅 Davr: {fetch_stats['date_from']} → {fetch_stats['date_to']}\n"
-            f"🔍 So'rovlar: {fetch_stats['total_requests']} "
-            f"(muvaffaqiyatli: {fetch_stats['successful']}, xato: {fetch_stats['failed']})\n"
-            f"📦 API dan keldi: {fetch_stats['unique_records']} ta\n"
-            f"🆕 Yangi: 0\n"
-            f"✏️ O'zgargan: 0\n"
-            f"📌 O'zgarishsiz: {unchanged_count}\n"
-            f"🗃 Arxivlangan: {archived_count}\n"
-            f"⏱ Vaqt: {elapsed} daqiqa\n\n"
-            f"🕐 <i>Yangilangan: {now_str()}</i>"
-        )
-        await progress.finish(summary)
+                    logger.error(f"Failed to send Excel to {uid}: {exc}")
 
     logger.info(
         f"Daily job done: new={len(new_records)}, updated={len(updated_records)}, "
-        f"archived={archived_count}, elapsed={elapsed}m"
+        f"archived={archived_count}"
     )
 
-
-def _format_changes_summary(
-    new_records: list[dict],
-    updated_records: list[dict],
-    fetch_stats: dict,
-    archived_count: int,
-    unchanged_count: int,
-    elapsed: int,
-    oliy_talim_count: int = 0,
-) -> str:
-    lines = ["📬 <b>Yangi ma'lumotlar topildi!</b>\n"]
-    lines.append(f"📅 Davr: {fetch_stats['date_from']} → {fetch_stats['date_to']}")
-
-    if new_records:
-        lines.append(f"\n🆕 <b>Yangi ishlar: {len(new_records)} ta</b>")
-        for r in new_records[:5]:
-            lines.append(
-                f"  • <code>{r.get('casenumber', '—')}</code> | "
-                f"{r.get('hearing_date', '')} {r.get('hearing_time', '')} | "
-                f"{r.get('globalid', '')}"
-            )
-        if len(new_records) > 5:
-            lines.append(f"  <i>... va yana {len(new_records) - 5} ta (Excel da to'liq)</i>")
-
-    if updated_records:
-        lines.append(f"\n✏️ <b>O'zgargan ishlar: {len(updated_records)} ta</b>")
-        for r in updated_records[:3]:
-            lines.append(
-                f"  • <code>{r.get('casenumber', '—')}</code> | "
-                f"{r.get('hearing_date', '')} {r.get('hearing_time', '')}"
-            )
-        if len(updated_records) > 3:
-            lines.append(f"  <i>... va yana {len(updated_records) - 3} ta</i>")
-
-    if oliy_talim_count:
-        lines.append(f"\n🎓 <b>Yangi ishlar ichidan oliy ta'limga tegishli: {oliy_talim_count} ta</b> (quyida alohida)")
-
-    lines.append(
-        f"\n📊 API dan keldi: {fetch_stats['unique_records']} ta | "
-        f"📌 O'zgarishsiz: {unchanged_count} | "
-        f"🗃 Arxiv: {archived_count} | ⏱ {elapsed} daqiqa"
-    )
-    lines.append(f"\n🕐 <i>Yangilangan: {now_str()}</i>")
-    return "\n".join(lines)
-
-
-def _format_oliy_talim_summary(records: list[dict]) -> str:
-    lines = ["🎓 <b>Yangi qo'shilganlar ichidan oliy ta'limga tegishli ishlar</b>\n"]
-    lines.append(f"Jami: <b>{len(records)} ta</b>\n")
-
-    for r in records[:10]:
-        lines.append(
-            f"🆕 <code>{r.get('casenumber', '—')}</code> | "
-            f"{r.get('hearing_date', '')} {r.get('hearing_time', '')}\n"
-            f"   <i>{r.get('category', '—')}</i>"
-        )
-    if len(records) > 10:
-        lines.append(f"\n<i>... va yana {len(records) - 10} ta (Excel da to'liq)</i>")
-
-    return "\n".join(lines)
+    if manual:
+        await _send_manual_finish(bot, user_ids, success=True)

@@ -37,12 +37,17 @@ def get_keywords() -> list[str]:
 def is_oliy_talim(record: dict[str, Any]) -> bool:
     """
     Berilgan sud ishi yozuvi oliy ta'limga tegishli muassasaga aloqador
-    (vazirlik/universitet/institut) ekanligini category maydoni bo'yicha tekshiradi.
+    (vazirlik/universitet/institut) ekanligini TEKSHIRADI — faqat "category"
+    emas, balki yozuvning BARCHA columnlari (casenumber, instance, claiment,
+    defendant, responsible va h.k.) bo'yicha qidiradi.
     """
-    category = _normalize(str(record.get("category") or ""))
-    if not category:
+    if not record:
         return False
-    return any(kw in category for kw in get_keywords())
+    combined = " ".join(str(v) for v in record.values() if v)
+    combined = _normalize(combined)
+    if not combined:
+        return False
+    return any(kw in combined for kw in get_keywords())
 
 
 def filter_oliy_talim(records: list[dict[str, Any]]) -> list[dict[str, Any]]:

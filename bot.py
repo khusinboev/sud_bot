@@ -59,20 +59,9 @@ async def main() -> None:
         f"Scheduler started: daily at {config.schedule_hour:02d}:{config.schedule_minute:02d} Tashkent"
     )
 
-    # Notify users bot is online
-    for uid in config.allowed_user_ids:
-        try:
-            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-            from src.handlers import main_keyboard
-            await bot.send_message(
-                uid,
-                f"🤖 <b>Bot ishga tushdi</b>\n"
-                f"⏰ Kunlik yangilanish: {config.schedule_hour:02d}:{config.schedule_minute:02d} (Toshkent)\n"
-                f"🌍 Hudud rejimi: <code>{config.region_mode}</code>",
-                reply_markup=main_keyboard(),
-            )
-        except Exception as exc:
-            logger.warning(f"Could not notify user {uid}: {exc}")
+    # Eslatma: bot ishga tushganda userlarga hech qanday bildirishnoma yuborilmaydi.
+    # Faqat jiddiy (kritik) API xatoliklari CRITICAL_ALERT_USER_ID ga yuboriladi
+    # (qarang: src/scheduler.py).
 
     logger.info("Starting polling...")
     try:
